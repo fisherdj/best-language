@@ -219,3 +219,21 @@
   (lambda (l)
     (nd-run-all (filter choose-bool l))))
 ;; (nd-run-all (with r (cons (choose-bool) (choose-bool)) (if (car r) (fail) (if (cdr r) r (fail)))))
+
+(defun gentag ()
+  (effect 'gentag))
+
+(define with-tags-from
+  (vau-rec with-tags-from (n-exp exp) env
+	   (with n (eval n-exp env)
+		 (capture eff cont
+			  (if (= eff 'gentag)
+			      (with-tags-from (+ n 1) (cont n))
+			      (with r (effect eff)
+				    (with-tags-from n (cont r))))
+			  (eval exp env)))))
+
+(define with-tags
+  (vau (exp) env
+       (with-tags-from 0 (eval exp env))))
+;; (with-tags (repl (current-env)))
