@@ -62,19 +62,29 @@
 
 (define lambda
   (vau (arglist body) env
-       (vau true-arg true-env
-	    (eval (cons f
-			(eval (cons list true-arg)
-			      true-env))
-		  ()))))
+       (with f (eval (list vau arglist #f body) env)
+	     (vau true-arg true-env
+		  (eval (cons f
+			      (eval (cons list true-arg)
+				    true-env))
+			())))))
+
+;; (define lambda-rec
+;;   (vau (name arglist body) env
+;;        (vau-rec true-rec true-arg true-env
+;; 		(eval (cons (eval (list vau arglist #f body)
+;; 				  (force (cons (cons name true-rec)
+;; 					       env)))
+;; 			    (force (eval (cons list true-arg) true-env)))
+;; 		      ()))))
 
 (define lambda-rec
   (vau (name arglist body) env
        (vau-rec true-rec true-arg true-env
 		(eval (cons (eval (list vau arglist #f body)
-				  (force (cons (cons name true-rec)
-					       env)))
-			    (force (eval (cons list true-arg) true-env)))
+				  (cons (cons name true-rec)
+					env))
+			    (eval (cons list true-arg) true-env))
 		      ()))))
 
 (define defun
@@ -109,7 +119,7 @@
   (lambda (x)
     (if x "#t" "#f")))
 
-(define list (lambda x x))
+;; (define list (lambda x x))
 
 (define leak-env
   (define 5 5))
@@ -117,3 +127,42 @@
 (define leak-rec-env
   (lambda-rec the-leak ()
 	      (define 6 6)))
+
+(define begin
+  (vau-rec begin l env
+	   (with r (eval (car l) env)
+		 (if (null? (cdr l))
+		     r
+		     (eval (cons begin (cdr l)) env)))))
+
+(defun read ()
+  (effect 'read))
+
+(defun write (x)
+  (effect (list 'write x)))
+
+(define repl
+  (lambda-rec repl (env)
+	      (begin (write '>)
+		     (write (eval (read) env))
+		     (repl env))))
+
+;; (define read-twice
+;;   (lambda ()
+;;     (cons (read) (read))))
+
+;; (define choose-bool
+;;   (lambda ()
+;;     (choose true false)))
+
+;; (define nd-run-all
+;;   (vau-rec rec (exp) env
+;; 	   (handle ('choose choices cont)
+;; 		   (rec
+;; 		    (apply append
+;; 			   (map cont choices)))
+;; 		   (eval exp env))))
+
+;; (define powerset
+;;   (lambda (l)
+;;     (nd-run-all (filter choose-bool l))))

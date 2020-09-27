@@ -42,7 +42,7 @@ data LData =
   | LStr String
   | LInt Integer
   | LCons LData LData
-  | LVau (LData -> LData -> LData)
+  | LVau (LData -> LData -> LRet)
 
 instance (Eq LData) where
   LNil == LNil = True
@@ -66,6 +66,12 @@ instance Show LData where
   show (LCons a b) = "(" ++ show a ++ showcdr b
   -- show (LLam _) = "<procedure>"
   show (LVau _) = "<vau-combiner>"
+
+data LRet = LRRet LData | LREff LData (LData -> LRet)
+
+instance Show LRet where
+  show (LRRet d) = "RETURN " ++ show d
+  show (LREff eff cont) = "EFFECT " ++ show eff
 
 showcdr (LNil) = ")"
 showcdr (LCons a b) = " " ++ show a ++ showcdr b
@@ -150,26 +156,71 @@ readString (x:rest) =
 ---- *EVALUATION STARTS HERE* ----
 ---- ************************ ----
 
+-- this is almost certainly actually bind
+continue :: LRet -> (LData -> LRet) -> LRet
+continue (LREff eff bCont) cont =
+  LREff eff (\x -> continue (bCont x) cont)
+continue (LRRet d) cont = cont d
 
-combine :: LData -> LData -> LData -> LData
+combine :: LData -> LData -> LData -> LRet
 combine (LVau f) arg env = f arg env
 combine f _ _ = error ("Invalid combiner " ++ show f)
 
-eval :: LData -> LData -> LData
-eval (LCons (LSym "if") args) env =
-  case args of
-    (LCons c (LCons t (LCons e LNil))) ->
-      if isTrue (eval c env)
-      then eval t env
-      else eval e env
-    _ -> error ("eval: if got invalid argument list" ++ show args)
+combineR :: LRet -> LData -> LData -> LRet
+combineR (LREff eff cont) arg env =
+  LREff eff (\x -> combineR (cont x) arg env)
+combineR (LRRet r) arg env = combine r arg env
+
+-- continue as defined above is "mathematically elegant"
+-- but it's not very comprehensible to somebody not familiar with Haskell's monads
+-- I think I'll avoid it in lieu of manual recursion, but I might try both
+
+eval :: LData -> LData -> LRet
 eval (LCons funExp args) env =
-  combine (eval funExp env) args env
+  combineR (eval funExp env) args env
 eval (LSym s) env =
   case aref (LSym s) env of
     Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
-    Just x -> x
-eval x _ = x
+    Just x -> LRRet x
+eval x _ = LRRet x
+
+evalIfR (LRRet LFalse) _ e env = eval e env
+evalIfR (LRRet _) t _ env = eval t env
+evalIfR (LREff eff cont) t e env =
+  LREff eff (\x -> evalIfR (cont x) t e env)
+
+evalIf c t e env = evalIfR (eval c env) t e env
+
+evalArgsRR :: LRet -> [LData] -> [LData] -> LData -> LRet
+evalArgsRR (LREff eff cont) l prev env =
+  LREff eff (\x -> evalArgsRR (cont x) l prev env)
+evalArgsRR (LRRet r) l prev env =
+  evalArgsR l (r:prev) env
+
+evalArgsR :: [LData] -> [LData] -> LData -> LRet
+evalArgsR (a:b) prev env = evalArgsRR (eval a env) b prev env
+evalArgsR [] prev _ = LRRet (foldr LCons LNil (reverse prev))
+
+evalArgs :: [LData] -> LData -> LRet
+evalArgs l env = evalArgsR l [] env
+
+-- using continue
+
+evalC :: LData -> LData -> LRet
+evalC (LCons funExp args) env =
+  continue (eval funExp env) (\f -> combine f args env)
+evalC (LSym s) env =
+  case aref (LSym s) env of
+    Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
+    Just x -> LRRet x
+evalC x _ = LRRet x
+
+evalIfC c t e env =
+  continue (eval c env) (\x -> if isTrue x then (eval t env) else (eval e env))
+
+evalArgsC :: [LData] -> LData -> LRet
+evalArgsC (a:b) env =
+  continue (eval a env) (\x -> continue (evalArgs b env) (\y -> LRRet (LCons x y)))
 
 appendEnv :: [(LData,LData)] -> LData -> LData
 appendEnv l env =
@@ -199,7 +250,7 @@ patMatch (LCons pa pb) (LCons aa ab) =
 patMatch (LCons _ _) _ = Nothing
 patMatch x y = if x == y then Just [] else Nothing
 
-makeVauProc :: LData -> LData -> LData -> LData -> LData -> LData -> LData
+makeVauProc :: LData -> LData -> LData -> LData -> LData -> LData -> LRet
 makeVauProc argPat envArg body env actualArg actualEnv =
   case (envArg,patMatch argPat actualArg) of
     (_,Nothing) -> error ("Invalid argumentl list: got\n" ++ show actualArg ++ "\nfor pattern\n" ++ show argPat)
@@ -210,13 +261,13 @@ makeVau :: LData -> LData -> LData -> LData -> LData
 makeVau argPat envArg body env =
   LVau (makeVauProc argPat envArg body env)
 
-makeVauRecProc :: LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData
+makeVauRecProc :: LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData -> LRet
 makeVauRecProc name argPat envArg body env recur actualArg actualEnv =
   makeVauProc argPat envArg body (acons name recur env) actualArg actualEnv
 
 makeVauRec :: LData -> LData -> LData -> LData -> LData -> LData
 makeVauRec name argPat envArg body env =
-  let recProc = (makeVauRecProc name argPat envArg body env :: LData -> LData -> LData -> LData)
+  let recProc = (makeVauRecProc name argPat envArg body env)
       recComb = LVau (recProc recComb) in
     recComb
 
@@ -235,37 +286,34 @@ makeVauRec name argPat envArg body env =
 -- makeVauRecAlt name argPat envArg body env =
 --   (LVau (makeVauRecProcAlt name argPat envArg body env))
 
-evalArgs :: [LData] -> LData -> [LData]
-evalArgs (a:b) env = eval a env:evalArgs b env
-evalArgs [] env = []
-
 asList :: LData -> Maybe [LData]
 asList (LNil) = Just []
 asList (LCons a b) =
   case asList b of
     Nothing -> Nothing
     Just t -> Just (a:t)
+asList x = error ("asList got " ++ show x)
 
-pairp [LCons _ _] = LTrue
-pairp _ = LFalse
+pairp [LCons _ _] = LRRet LTrue
+pairp _ = LRRet LFalse
 
-numberp [LInt _] = LTrue
-numberp _ = LFalse
+numberp [LInt _] = LRRet LTrue
+numberp _ = LRRet LFalse
 
-symbolp [LSym _] = LTrue
-symbolp _ = LFalse
+symbolp [LSym _] = LRRet LTrue
+symbolp _ = LRRet LFalse
 
-stringp [LStr _] = LTrue
-stringp _ = LFalse
+stringp [LStr _] = LRRet LTrue
+stringp _ = LRRet LFalse
 
-nullp [LNil] = LTrue
-nullp _ = LFalse
+nullp [LNil] = LRRet LTrue
+nullp _ = LRRet LFalse
 
 isTrue :: LData -> Bool
 isTrue LFalse = False
 isTrue _ = True
 
-primCombProc :: String -> Int -> ([LData] -> LData -> LData) -> LData -> LData -> LData
+primCombProc :: String -> Int -> ([LData] -> LData -> LRet) -> LData -> LData -> LRet
 primCombProc name nArgs f argl env =
   case asList argl of
     Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
@@ -274,61 +322,93 @@ primCombProc name nArgs f argl env =
       then f l env
       else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
 
-primCombRecord :: String -> Int -> ([LData] -> LData -> LData) -> (LData,LData)
+primCombRecord :: String -> Int -> ([LData] -> LData -> LRet) -> (LData,LData)
 primCombRecord name nArgs f =
   (LSym name, LVau (primCombProc name nArgs f))
 
-primRecordProc :: String -> Int -> ([LData] -> LData) -> LData -> LData
-primRecordProc name nArgs f =
-  \argl -> case asList argl of
-            Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
-            Just l ->
-              if length l == nArgs
-              then f l
-              else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
+primRecordL f (Just l) = f l
+primRecordL f Nothing = error "Impossible Error"
 
-primRecord :: String -> Int -> ([LData] -> LData) -> (LData,LData)
--- primRecord name nArgs f =
---   (LSym name, LLam (primRecordProc name nArgs f))
+primRecord :: String -> Int -> ([LData] -> LRet) -> (LData,LData)
 primRecord name nArgs f =
-  primCombRecord name nArgs (\argl env -> f (evalArgs argl env))
-  -- (LSym name, LVau (primRecordProc name nArgs f))
+  primCombRecord name nArgs (\argl env -> continue (evalArgs argl env) (\x -> primRecordL f (asList x)))
+
+contVau cont =
+  LVau (\(LCons exp LNil) env -> continue (eval exp env) cont)
+
+withCapture [var,cVar,cap,body] env =
+  case eval body env of
+    LRRet r -> LRRet r
+    LREff eff cont ->
+      eval cap (acons var eff (acons cVar (contVau cont) env))
 
 defaultEnv :: LData
 defaultEnv =
-  makeEnv [primRecord "cons" 2 (\[x,y] -> LCons x y)
-          ,primRecord "=" 2 (\[x,y] -> fromBool (x == y))
+  makeEnv [primRecord "cons" 2 (\[x,y] -> LRRet (LCons x y))
+          ,primRecord "=" 2 (\[x,y] -> LRRet (fromBool (x == y)))
           ,primRecord "eval" 2 (\[exp,env] -> eval exp env)
-          ,primCombRecord "vau" 3 (\[argPat,envArg,body] env -> makeVau argPat envArg body env)
-          ,primCombRecord "vau-rec" 4 (\[name,argPat,envArg,body] env -> makeVauRec name argPat envArg body env)
-          ,primRecord "if" 3 (\[c,t,e] -> if (isTrue c) then t else e)
+          ,primCombRecord "vau" 3 (\[argPat,envArg,body] env -> LRRet (makeVau argPat envArg body env))
+          ,primCombRecord "vau-rec" 4 (\[name,argPat,envArg,body] env -> LRRet (makeVauRec name argPat envArg body env))
+          ,primCombRecord "if" 3 (\[c,t,e] env -> evalIf c t e env)
           -- may need to be changed if eager evaluation occurs
+          ,primRecord "effect" 1 (\[eff] -> LREff eff LRRet)
+          ,primCombRecord "capture" 4 withCapture
           ,primRecord "pair?" 1 pairp
           ,primRecord "number?" 1 numberp
           ,primRecord "symbol?" 1 symbolp
           ,primRecord "string?" 1 stringp
           ,primRecord "null?" 1 nullp
-          ,primRecord "car" 1 (\[LCons a b] -> a)
-          ,primRecord "cdr" 1 (\[LCons a b] -> b)
-          ,primRecord "+" 2 (\[LInt x,LInt y] -> LInt (x+y))
-          ,primRecord "-" 2 (\[LInt x,LInt y] -> LInt (x - y))
-          ,primRecord "/" 2 (\[LInt x,LInt y] -> LInt (div x y))
-          ,primRecord "%" 2 (\[LInt x,LInt y] -> LInt (rem x y))
-          ,primRecord "*" 2 (\[LInt x,LInt y] -> LInt (x*y))
+          ,primRecord "car" 1 (\[LCons a b] -> LRRet a)
+          ,primRecord "cdr" 1 (\[LCons a b] -> LRRet b)
+          ,primRecord "+" 2 (\[LInt x,LInt y] -> LRRet (LInt (x+y)))
+          ,primRecord "-" 2 (\[LInt x,LInt y] -> LRRet (LInt (x - y)))
+          ,primRecord "/" 2 (\[LInt x,LInt y] -> LRRet (LInt (div x y)))
+          ,primRecord "%" 2 (\[LInt x,LInt y] -> LRRet (LInt (rem x y)))
+          ,primRecord "*" 2 (\[LInt x,LInt y] -> LRRet (LInt (x*y)))
           ]
 
-evalTop :: [LData] -> LData -> LData
-evalTop l env = foldl (\ienv iexp -> eval iexp ienv) env l
+evalEffD :: LData -> (LData -> LRet) -> IO LRet
+evalEffD (LSym "read") cont = do {
+    ln <- getLine;
+    return (cont (fst (readExpr ln)))
+  }
+evalEffD (LCons (LSym "write") (LCons x LNil)) cont = do {
+    print x;
+    return (cont LNil);
+  }
+evalEffD eff cont = error ("Unrecognized effect: " ++ show eff)
+
+evalEff :: LData -> (LData -> LRet) -> IO LData
+evalEff eff cont = do {
+    result <- evalEffD eff cont;
+    case result of
+      LRRet r -> return r
+      LREff eff cont -> evalEff eff cont
+  }
+
+-- evalTop :: LData -> LData -> IO LDat
+-- evalTop exp env = return (eval exp env)
+
+evalTop :: [LData] -> LData -> IO LData
+evalTop [] env = return env
+evalTop (a:b) env = do {
+  -- print a;
+  case eval a env of
+    LRRet val -> evalTop b val
+    LREff eff cont -> evalEff eff cont
+  }
 
 mainArgs :: [String] -> LData -> IO ()
 mainArgs [] env = return ()
 mainArgs ("-e":expString:rest) env = do {
-    print (evalTop (readForest expString) env);
+    result <- (evalTop (readForest expString) env);
+    print result;
     mainArgs rest env;
   }
 mainArgs ("-f":fileName:rest) env = do {
     file <- readFile fileName;
-    mainArgs rest (evalTop (readForest file) env);
+    result <- evalTop (readForest file) env;
+    mainArgs rest result
   }
 
 main :: IO ()
