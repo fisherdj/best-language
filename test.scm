@@ -1,3 +1,91 @@
+(cons (cons ((vau (a) e a) quote)
+	    (vau (a) e a))
+      ((vau () e e)))
+
+(cons (cons 'define
+	    (vau (name exp) env
+		 (cons (cons name (eval exp env))
+		       env)))
+      ((vau () e e)))
+
+(define current-env (vau () e e))
+
+(define self-eval (vau-rec self-eval () #f self-eval))
+
+(define all-args (vau-rec rec arg env (cons rec (cons arg env))))
+
+(define list
+  (vau-rec list a e
+	   (if (pair? a)
+	       (cons (eval (car a) e)
+		     (eval (cons list (cdr a)) e))
+	       (if (null? a)
+		   ()
+		   (car 0)))))
+
+(define with
+  (vau (name expr body) env
+       (eval body
+	     (cons (cons name (eval expr env))
+		   env))))
+
+(define length
+  (vau-rec length (a) e
+	   (with r (eval a e)
+		 (if (pair? r)
+		     (+ 1 (eval (list length (list quote (cdr r)))
+				()))
+		     0))))
+
+(define size
+  (vau-rec size (a) e
+	   (with r (eval a e)
+		 (if (pair? r)
+		     (+ (eval (list size (list quote (car r)))
+			      ())
+			(eval (list size (list quote (cdr r)))
+			      ()))
+		     1))))
+
+;; necessary to force eagerness in Haskell
+;; is the behavior seen with (loop) a bug?
+(define force
+  (vau (a) e
+       (with r (eval a e)
+	     (if (size r) r 0))))
+
+(define vau-loop
+  (vau-rec vau-loop () #f
+	   (eval (list vau-loop) ())))
+
+;; would like to put error here, but would require implementing error primitive
+
+(define lambda
+  (vau (arglist body) env
+       (vau true-arg true-env
+	    (eval (cons f
+			(eval (cons list true-arg)
+			      true-env))
+		  ()))))
+
+(define lambda-rec
+  (vau (name arglist body) env
+       (vau-rec true-rec true-arg true-env
+		(eval (cons (eval (list vau arglist #f body)
+				  (force (cons (cons name true-rec)
+					       env)))
+			    (force (eval (cons list true-arg) true-env)))
+		      ()))))
+
+(define defun
+  (vau (name arglist body) env
+       (eval (list define name
+		   (list lambda-rec name arglist body))
+	     env)))
+
+(defun combine (f arg env)
+  (eval (cons f arg) env))
+
 (define loop
   (lambda-rec loop () (loop)))
 

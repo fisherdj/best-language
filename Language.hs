@@ -42,7 +42,7 @@ data LData =
   | LStr String
   | LInt Integer
   | LCons LData LData
-  | LLam (LData -> LData)
+  | LVau (LData -> LData -> LData)
 
 instance (Eq LData) where
   LNil == LNil = True
@@ -64,7 +64,8 @@ instance Show LData where
   show (LInt n) = show n
   -- show (LCons a b) = "(" ++ show a ++ " . " ++ show b ++ ")"
   show (LCons a b) = "(" ++ show a ++ showcdr b
-  show (LLam _) = "<procedure>"
+  -- show (LLam _) = "<procedure>"
+  show (LVau _) = "<vau-combiner>"
 
 showcdr (LNil) = ")"
 showcdr (LCons a b) = " " ++ show a ++ showcdr b
@@ -149,19 +150,32 @@ readString (x:rest) =
 ---- *EVALUATION STARTS HERE* ----
 ---- ************************ ----
 
+
+combine :: LData -> LData -> LData -> LData
+combine (LVau f) arg env = f arg env
+combine f _ _ = error ("Invalid combiner " ++ show f)
+
+eval :: LData -> LData -> LData
+eval (LCons (LSym "if") args) env =
+  case args of
+    (LCons c (LCons t (LCons e LNil))) ->
+      if isTrue (eval c env)
+      then eval t env
+      else eval e env
+    _ -> error ("eval: if got invalid argument list" ++ show args)
+eval (LCons funExp args) env =
+  combine (eval funExp env) args env
+eval (LSym s) env =
+  case aref (LSym s) env of
+    Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
+    Just x -> x
+eval x _ = x
+
 appendEnv :: [(LData,LData)] -> LData -> LData
 appendEnv l env =
   foldr LCons env (map (\(x,y) -> LCons x y) l)
 
 makeEnv l = appendEnv l LNil
-
-apply :: LData -> LData -> LData
-apply (LLam f) arg = f arg
-apply x _ = error ("Cannot apply " ++ show x)
-
-isTrue :: LData -> Bool
-isTrue LFalse = False
-isTrue _ = True
 
 fromBool False = LFalse
 fromBool True = LTrue
@@ -175,6 +189,7 @@ aref k (LCons (LCons ik iv) e) =
   else aref k e
 aref _ _ = Nothing
 
+-- it's possible
 patMatch :: LData -> LData -> Maybe [(LData,LData)]
 patMatch (LSym s) arg = Just [(LSym s,arg)]
 patMatch (LCons pa pb) (LCons aa ab) =
@@ -184,59 +199,45 @@ patMatch (LCons pa pb) (LCons aa ab) =
 patMatch (LCons _ _) _ = Nothing
 patMatch x y = if x == y then Just [] else Nothing
 
-makeLambdaProc :: LData -> LData -> LData -> LData -> LData
-makeLambdaProc argPat body env actualArg =
-  case patMatch argPat actualArg of
-    Just l -> eval body (appendEnv l env)
-    Nothing -> error ("Invalid argumentl list: got\n" ++ show actualArg ++ "\nfor pattern\n" ++ show argPat)
+makeVauProc :: LData -> LData -> LData -> LData -> LData -> LData -> LData
+makeVauProc argPat envArg body env actualArg actualEnv =
+  case (envArg,patMatch argPat actualArg) of
+    (_,Nothing) -> error ("Invalid argumentl list: got\n" ++ show actualArg ++ "\nfor pattern\n" ++ show argPat)
+    (LFalse,Just l) -> eval body (appendEnv l env)
+    (_,Just l) -> eval body (appendEnv l (acons envArg actualEnv env))
 
-makeLambdaRecProc :: LData -> LData -> LData -> LData -> LData -> LData
-makeLambdaRecProc name argPat body env actualArg =
-  (makeLambdaProc
-   argPat
-   body
-   (acons name (LLam (makeLambdaRecProc name argPat body env)) env)
-  actualArg)
+makeVau :: LData -> LData -> LData -> LData -> LData
+makeVau argPat envArg body env =
+  LVau (makeVauProc argPat envArg body env)
 
-makeLambdaRec :: LData -> LData -> LData -> LData -> LData
-makeLambdaRec name argPat body env  =
-  (LLam (makeLambdaRecProc name argPat body env))
+makeVauRecProc :: LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData
+makeVauRecProc name argPat envArg body env recur actualArg actualEnv =
+  makeVauProc argPat envArg body (acons name recur env) actualArg actualEnv
 
-evalArgs :: LData -> LData -> LData
-evalArgs (LCons a b) env = LCons (eval a env) (evalArgs b env)
-evalArgs LNil env = LNil
+makeVauRec :: LData -> LData -> LData -> LData -> LData -> LData
+makeVauRec name argPat envArg body env =
+  let recProc = (makeVauRecProc name argPat envArg body env :: LData -> LData -> LData -> LData)
+      recComb = LVau (recProc recComb) in
+    recComb
 
-eval :: LData -> LData -> LData
-eval (LCons (LSym "if") args) env =
-  case args of
-    (LCons c (LCons t (LCons e LNil))) ->
-      if isTrue (eval c env)
-      then eval t env
-      else eval e env
-    _ -> error ("eval: if got invalid argument list" ++ show args)
-eval (LCons (LSym "quote") args) env =
-  case args of
-    (LCons x LNil) -> x
-    _ -> error ("eval: quote got invalid argument list" ++ show args)
-eval (LCons (LSym "define") args) env =
-  case args of
-    (LCons name (LCons valExp LNil)) -> acons name (eval valExp env) env
-    _ -> error ("eval: define got invalid argument list " ++ show args)
-eval (LCons (LSym "lambda") args) env =
-  case args of
-    (LCons argPat (LCons body LNil)) ->
-      (LLam (makeLambdaProc argPat body env))
-eval (LCons (LSym "lambda-rec") args) env =
-  case args of
-    (LCons name (LCons argPat (LCons body LNil))) ->
-      (makeLambdaRec name argPat body env)
-eval (LCons funExp args) env =
-  apply (eval funExp env) (evalArgs args env)
-eval (LSym s) env =
-  case aref (LSym s) env of
-    Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
-    Just x -> x
-eval x _ = x
+-- left in commit for Haskell
+-- makeVauRecProcAlt :: LData -> LData -> LData -> LData -> LData -> LData -> LData -> LData
+-- makeVauRecProcAlt name argPat envArg body env actualArg actualEnv =
+--   (makeVauProc
+--    argPat
+--    envArg
+--    body
+--    (acons name (LVau (makeVauRecProcAlt name argPat envArg body env)) env)
+--   actualArg
+--   actualEnv)
+
+-- makeVauRecAlt :: LData -> LData -> LData -> LData -> LData -> LData
+-- makeVauRecAlt name argPat envArg body env =
+--   (LVau (makeVauRecProcAlt name argPat envArg body env))
+
+evalArgs :: [LData] -> LData -> [LData]
+evalArgs (a:b) env = eval a env:evalArgs b env
+evalArgs [] env = []
 
 asList :: LData -> Maybe [LData]
 asList (LNil) = Just []
@@ -244,19 +245,6 @@ asList (LCons a b) =
   case asList b of
     Nothing -> Nothing
     Just t -> Just (a:t)
-
-primRecordProc :: String -> Int -> ([LData] -> LData) -> LData -> LData
-primRecordProc name nArgs f =
-  \argl -> case asList argl of
-            Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
-            Just l ->
-              if length l == nArgs
-              then f l
-              else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
-
-primRecord :: String -> Int -> ([LData] -> LData) -> (LData,LData)
-primRecord name nArgs f =
-  (LSym name, LLam (primRecordProc name nArgs f))
 
 pairp [LCons _ _] = LTrue
 pairp _ = LFalse
@@ -273,17 +261,55 @@ stringp _ = LFalse
 nullp [LNil] = LTrue
 nullp _ = LFalse
 
+isTrue :: LData -> Bool
+isTrue LFalse = False
+isTrue _ = True
+
+primCombProc :: String -> Int -> ([LData] -> LData -> LData) -> LData -> LData -> LData
+primCombProc name nArgs f argl env =
+  case asList argl of
+    Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
+    Just l ->
+      if length l == nArgs
+      then f l env
+      else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
+
+primCombRecord :: String -> Int -> ([LData] -> LData -> LData) -> (LData,LData)
+primCombRecord name nArgs f =
+  (LSym name, LVau (primCombProc name nArgs f))
+
+primRecordProc :: String -> Int -> ([LData] -> LData) -> LData -> LData
+primRecordProc name nArgs f =
+  \argl -> case asList argl of
+            Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
+            Just l ->
+              if length l == nArgs
+              then f l
+              else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
+
+primRecord :: String -> Int -> ([LData] -> LData) -> (LData,LData)
+-- primRecord name nArgs f =
+--   (LSym name, LLam (primRecordProc name nArgs f))
+primRecord name nArgs f =
+  primCombRecord name nArgs (\argl env -> f (evalArgs argl env))
+  -- (LSym name, LVau (primRecordProc name nArgs f))
+
 defaultEnv :: LData
 defaultEnv =
   makeEnv [primRecord "cons" 2 (\[x,y] -> LCons x y)
           ,primRecord "=" 2 (\[x,y] -> fromBool (x == y))
+          ,primRecord "eval" 2 (\[exp,env] -> eval exp env)
+          ,primCombRecord "vau" 3 (\[argPat,envArg,body] env -> makeVau argPat envArg body env)
+          ,primCombRecord "vau-rec" 4 (\[name,argPat,envArg,body] env -> makeVauRec name argPat envArg body env)
+          ,primRecord "if" 3 (\[c,t,e] -> if (isTrue c) then t else e)
+          -- may need to be changed if eager evaluation occurs
           ,primRecord "pair?" 1 pairp
           ,primRecord "number?" 1 numberp
           ,primRecord "symbol?" 1 symbolp
           ,primRecord "string?" 1 stringp
           ,primRecord "null?" 1 nullp
           ,primRecord "car" 1 (\[LCons a b] -> a)
-          ,primRecord "cdr" 1 (\[LCons a b] -> a)
+          ,primRecord "cdr" 1 (\[LCons a b] -> b)
           ,primRecord "+" 2 (\[LInt x,LInt y] -> LInt (x+y))
           ,primRecord "-" 2 (\[LInt x,LInt y] -> LInt (x - y))
           ,primRecord "/" 2 (\[LInt x,LInt y] -> LInt (div x y))
