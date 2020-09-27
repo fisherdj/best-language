@@ -147,22 +147,75 @@
 		     (write (eval (read) env))
 		     (repl env))))
 
-;; (define read-twice
-;;   (lambda ()
-;;     (cons (read) (read))))
+(define foldl
+  (lambda-rec foldl (f init l)
+	      (if (null? l)
+		  init
+		  (foldl f (f (car l) init) (cdr l)))))
 
-;; (define choose-bool
-;;   (lambda ()
-;;     (choose true false)))
+(defun reverse (l) (foldl cons () l))
+(defun foldr (f init l) (foldl f init (reverse l)))
 
-;; (define nd-run-all
-;;   (vau-rec rec (exp) env
-;; 	   (handle ('choose choices cont)
-;; 		   (rec
-;; 		    (apply append
-;; 			   (map cont choices)))
-;; 		   (eval exp env))))
+(defun app-2 (x y)
+  (foldr cons y x))
 
-;; (define powerset
-;;   (lambda (l)
-;;     (nd-run-all (filter choose-bool l))))
+(defun append x
+  (foldr app-2 () x))
+
+(define map
+  (lambda-rec map (f l)
+	      (if (null? l)
+		  ()
+		  (cons (f (car l)) (map f (cdr l))))))
+
+(defun apply (f l)
+  (eval (cons f
+	      (map (lambda (x) (list quote x))
+		   l))
+	()))
+
+(define filter
+  (lambda-rec filter (f l)
+	      (if (null? l)
+		  ()
+		  (if (f (car l))
+		      (cons (car l)
+			    (filter f (cdr l)))
+		      (filter f (cdr l))))))
+
+(defun choose x
+  (effect (cons 'choose x)))
+
+(defun choose-bool x
+  (choose #t #f))
+
+(defun fail ()
+  (effect 'fail))
+
+(define nd-run-all-rec
+  (vau-rec nd-run-all-rec (exp) env
+	   (capture eff cont
+		    (if (if (pair? eff)
+			    (= (car eff) 'choose)
+			    #f)
+			;; (apply append
+			;;        (map cont (cdr eff)))
+			(apply append
+			       (map (lambda (c)
+				      (nd-run-all-rec (cont c)))
+				    (cdr eff)))
+			(if (= eff 'fail)
+			    ()
+			    (with r (effect eff)
+				  (nd-run-all-rec (cont r)))))
+		    (eval exp env))))
+
+(define nd-run-all
+  (vau (exp) env
+       (eval (list nd-run-all-rec (list list exp))
+	     env)))
+
+(define powerset
+  (lambda (l)
+    (nd-run-all (filter choose-bool l))))
+;; (nd-run-all (with r (cons (choose-bool) (choose-bool)) (if (car r) (fail) (if (cdr r) r (fail)))))
