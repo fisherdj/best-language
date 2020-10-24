@@ -142,6 +142,8 @@ readExpr [] = error "readExpr got nothing"
 
 readHash ('t':rest) = (LTrue,rest)
 readHash ('f':rest) = (LFalse,rest)
+readHash [] = error "readHash got nothing"
+readHash _ = error "readHash got invalid"
 
 -- EXCELLENT CHOICE OF NAMES HERE
 readString ('\\':escaped:rest) =
@@ -152,10 +154,14 @@ readString ('\\':escaped:rest) =
 readString ('"':rest) = ([],rest)
 readString (x:rest) =
   let (s,rmd) = readString rest in (x:s,rmd)
+readString [] =
+  error "readString got nothing"
 
 ---- ************************ ----
 ---- *EVALUATION STARTS HERE* ----
 ---- ************************ ----
+primError :: (LData -> LRet) -> String -> LRet
+primError k s = LREff (LCons (LSym "prim-error") (LStr s)) k
 
 -- this is almost certainly actually bind
 continue :: LRet -> (LData -> LRet) -> LRet
@@ -165,23 +171,19 @@ continue (LRRet d) cont = cont d
 
 combine :: LCont -> LData -> LData -> LData -> LRet
 combine k (LVau f) arg env = f k arg env
-combine _ f _ _ = error ("Invalid combiner " ++ show f)
+combine k f _ _ = primError k ("Invalid combiner " ++ show f)
 
 eval :: LCont -> LData -> LData -> LRet
 eval k (LCons funExp args) env =
   eval (\f -> combine k f args env) funExp env
 eval k (LSym s) env =
   case aref (LSym s) env of
-    Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
+    Nothing -> primError k ("eval Unbound variable " ++ s ++ " in " ++ show env)
     Just x -> k x
 eval k x _ = k x
 
 evalIf k c t e env =
   eval (\x -> if isTrue x then eval k t env else eval k e env) c env
-
-evalArgs k [] env = k LNil
-evalArgs k (x:xs) env =
-  eval (\r -> evalArgs (\rs -> k (LCons r rs)) xs env) x env
 
 appendEnv :: [(LData,LData)] -> LData -> LData
 appendEnv l env =
@@ -201,7 +203,7 @@ aref k (LCons (LCons ik iv) e) =
   else aref k e
 aref _ _ = Nothing
 
--- it's possible
+-- it's possible to do this in the language itself
 patMatch :: LData -> LData -> Maybe [(LData,LData)]
 patMatch (LSym s) arg = Just [(LSym s,arg)]
 patMatch (LCons pa pb) (LCons aa ab) =
@@ -214,7 +216,7 @@ patMatch x y = if x == y then Just [] else Nothing
 makeVauProc :: LData -> LData -> LData -> LData -> LCont -> LData -> LData -> LRet
 makeVauProc argPat envArg body env k actualArg actualEnv =
   case (envArg,patMatch argPat actualArg) of
-    (_,Nothing) -> error ("Invalid argumentl list: got\n" ++ show actualArg ++ "\nfor pattern\n" ++ show argPat)
+    (_,Nothing) -> primError k ("Invalid argumentl list: got\n" ++ show actualArg ++ "\nfor pattern\n" ++ show argPat)
     (LFalse,Just l) -> eval k body (appendEnv l env)
     (_,Just l) -> eval k body (appendEnv l (acons envArg actualEnv env))
 
@@ -247,14 +249,6 @@ makeVauRec name argPat envArg body env =
 -- makeVauRecAlt name argPat envArg body env =
 --   (LVau (makeVauRecProcAlt name argPat envArg body env))
 
-asList :: LData -> Maybe [LData]
-asList (LNil) = Just []
-asList (LCons a b) =
-  case asList b of
-    Nothing -> Nothing
-    Just t -> Just (a:t)
-asList x = error ("asList got " ++ show x)
-
 pairp [LCons _ _] = LTrue
 pairp _ = LFalse
 
@@ -274,25 +268,35 @@ isTrue :: LData -> Bool
 isTrue LFalse = False
 isTrue _ = True
 
+asList :: LData -> Maybe [LData]
+asList (LNil) = Just []
+asList (LCons a b) =
+  case asList b of
+    Just l -> Just (a:l)
+    Nothing -> Nothing
+asList _ = Nothing
+
 primCombProc :: String -> Int -> (LCont -> [LData] -> LData -> LRet) -> LCont -> LData -> LData -> LRet
 primCombProc name nArgs f k argl env =
   case asList argl of
-    Nothing -> error ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
+    Nothing -> primError k ("Primitive " ++ name ++ " did not get a proper argument list" ++ show argl)
     Just l ->
       if length l == nArgs
       then f k l env
-      else error ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
+      else primError k ("Primitive " ++ name ++ " expected " ++ show nArgs ++ " arguments but got " ++ show (length l))
 
 primCombRecord :: String -> Int -> (LCont -> [LData] -> LData -> LRet) -> (LData,LData)
 primCombRecord name nArgs f =
   (LSym name, LVau (primCombProc name nArgs f))
 
-primRecordL f (Just l) = f l
-primRecordL f Nothing = error "Impossible Error"
+evalArgs :: ([LData] -> LRet) -> [LData] -> LData -> LRet
+evalArgs k [] env = k []
+evalArgs k (x:xs) env =
+  eval (\r -> evalArgs (\rs -> k (r:rs)) xs env) x env
 
 primRecord :: String -> Int -> ([LData] -> LData) -> (LData,LData)
 primRecord name nArgs f =
-  primCombRecord name nArgs (\k argl env -> evalArgs (\x -> (k (primRecordL f (asList x)))) argl env)
+  primCombRecord name nArgs (\k argl env -> evalArgs (\x -> (k (f x))) argl env)
 
 composeCont :: LCont -> LCont -> LCont
 composeCont k1 k2 ret =
@@ -303,11 +307,16 @@ composeCont k1 k2 ret =
 contVau k1 =
   LVau (\k2 (LCons exp LNil) env -> (eval (composeCont k2 k1) exp env))
 
-withCapture k [var,cVar,cap,body] env =
-  case eval LRRet body env of
-    LRRet r -> k r
-    LREff eff cont ->
-      eval k cap (acons var eff (acons cVar (contVau cont) env))
+-- withCapture k [var,cVar,cap,body] env =
+--   case eval LRRet body env of
+--     LRRet r -> k r
+--     LREff eff cont ->
+--       eval k cap (acons var eff (acons cVar (contVau cont) env))
+
+evalCapture [exp,env] =
+  case eval LRRet exp env of
+    LRRet r -> LCons (LSym "value") r
+    LREff eff cont -> LCons (LSym "effect") (LCons eff (contVau cont))
 
 evalPrim k [expArg,envArg] outerEnv =
   eval (\exp -> eval (\env -> eval k exp env) envArg outerEnv) expArg outerEnv
@@ -322,7 +331,7 @@ defaultEnv =
           ,primCombRecord "if" 3 (\k [c,t,e] env -> evalIf k c t e env)
           -- may need to be changed if eager evaluation occurs
           ,primCombRecord "effect" 1 (\k [eff] env -> eval (\x -> LREff x k) eff env)
-          ,primCombRecord "capture" 4 withCapture
+          ,primRecord "eval-capture" 2 evalCapture
           ,primRecord "pair?" 1 pairp
           ,primRecord "number?" 1 numberp
           ,primRecord "symbol?" 1 symbolp
