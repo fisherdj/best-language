@@ -15,17 +15,14 @@ digitInt '8' = Just 8
 digitInt '9' = Just 9
 digitInt _ = Nothing
 
-digitString :: String -> Maybe Integer --- sorry, we're not doing this polymorphic
+digitString :: String -> Maybe Integer
 digitStringLE [] = Just 0
-digitStringLE (x:s) = -- I don't want to hear anything about monads here
+digitStringLE (x:s) =
   case (digitInt x,digitStringLE s) of
     (Just d,Just n) -> Just (d + n * 10)
     (_,_) -> Nothing
 
 digitString s = digitStringLE (reverse s)
-
--- do { d <- digitInt x; n <- digitString s; return (d+n*10) }
--- ^ this is not suitable for our purposes, but I do know how to do it
 
 numString "-" = Nothing
 numString ('-':s) =
@@ -34,6 +31,9 @@ numString ('-':s) =
     Just n -> Just (-n)
 numString s = digitString s
 
+---- ******************* ----
+---- *THE MAIN DATATYPE* ----
+---- ******************* ----
 data LData =
   LNil
   | LTrue
@@ -45,7 +45,7 @@ data LData =
   | LLam LData LData LData LData
   | LPrim ([LData] -> LData)
 
-instance (Eq LData) where
+instance Eq LData where
   LNil == LNil = True
   LTrue == LTrue = True
   LFalse == LFalse = True
@@ -56,7 +56,6 @@ instance (Eq LData) where
   LLam a1 b1 c1 d1 == LLam a2 b2 c2 d2 = [a1,b1,c1,d1] == [a2,b2,c2,d2]
   _ == _ = False
 
--- First, the writer, so we can debug:
 instance Show LData where
   show LNil = "()"
   show LTrue = "#t"
@@ -64,7 +63,6 @@ instance Show LData where
   show (LSym s) = s
   show (LStr s) = show s
   show (LInt n) = show n
-  -- show (LCons a b) = "(" ++ show a ++ " . " ++ show b ++ ")"
   show (LCons a b) = "(" ++ show a ++ showcdr b
   show (LLam _ _ _ _) = "<procedure>"
   show (LPrim _) = "<primitive>"
@@ -73,17 +71,19 @@ showcdr (LNil) = ")"
 showcdr (LCons a b) = " " ++ show a ++ showcdr b
 showcdr x = " . " ++ show x ++ ")"
 
-nextLine :: String -> String
-nextLine [] = []
-nextLine ('\n':rest) = rest
-nextLine (_:rest) = nextLine rest
-
+---- ************ ----
+---- *THE PARSER* ----
+---- ************ ----
 filterComments :: String -> String
 filterComments [] = []
 filterComments (';':rest) = filterComments (nextLine rest)
 filterComments (x:rest) = x:filterComments rest
 
--- skipSpace might be a better idea in a real reader
+nextLine :: String -> String
+nextLine [] = []
+nextLine ('\n':rest) = rest
+nextLine (_:rest) = nextLine rest
+
 readForestC :: String -> [LData]
 readForestC [] = []
 readForestC (x:rest) =
@@ -93,7 +93,21 @@ readForestC (x:rest) =
 
 readForest s = readForestC (filterComments s)
 
--- don't have dotted lists implemented
+readExpr :: String -> (LData,String)
+readExpr ('#':rest) = readHash rest
+readExpr ('(':rest) = readLList rest
+readExpr (')':rest) =
+  error "readExpr got spurious closing delimiter"
+readExpr ('"':rest) =
+  let (s,rmd) = readString rest in (LStr s,rmd)
+readExpr ('\'':rest) =
+  let (s,rmd) = readExpr rest in (LCons (LSym "quote") (LCons s LNil),rmd)
+readExpr (x:rest) =
+  if isSpace x
+  then readExpr rest
+  else readSymNum (x:rest)
+readExpr [] = error "readExpr got nothing"
+
 readLList :: String -> (LData,String)
 readLList (')':rest) = (LNil,rest)
 readLList (x:rest) =
@@ -120,25 +134,9 @@ readSymNum s =
       Nothing -> (LSym rd,rmd)
       Just x -> (LInt x,rmd)
 
-readExpr :: String -> (LData,String)
-readExpr ('#':rest) = readHash rest
-readExpr ('(':rest) = readLList rest
-readExpr (')':rest) =
-  error "readExpr got spurious closing delimiter"
-readExpr ('"':rest) =
-  let (s,rmd) = readString rest in (LStr s,rmd)
-readExpr ('\'':rest) =
-  let (s,rmd) = readExpr rest in (LCons (LSym "quote") (LCons s LNil),rmd)
-readExpr (x:rest) =
-  if isSpace x
-  then readExpr rest
-  else readSymNum (x:rest)
-readExpr [] = error "readExpr got nothing"
-
 readHash ('t':rest) = (LTrue,rest)
 readHash ('f':rest) = (LFalse,rest)
 
--- EXCELLENT CHOICE OF NAMES HERE
 readString ('\\':escaped:rest) =
   let (restStr,rmd) = readString rest in
     case escaped of 'n' -> ('\n':restStr,rmd)
@@ -231,13 +229,6 @@ eval (LSym s) env =
     Just x -> x
 eval x _ = x
 
-asList :: LData -> Maybe [LData]
-asList (LNil) = Just []
-asList (LCons a b) =
-  case asList b of
-    Nothing -> Nothing
-    Just t -> Just (a:t)
-
 primRecordProc :: String -> Int -> ([LData] -> LData) -> [LData] -> LData
 primRecordProc name nArgs f argl =
   if length argl == nArgs
@@ -256,7 +247,7 @@ initEnv :: LData
 initEnv =
   makePrimEnv
     [primRecord "cons" 2 (\[x,y] -> LCons x y)
-    ,primRecord "=" 2 (\[x,y] -> fromBool (x == y))
+    ,primRecord "=" 2 (\[x,y] -> if (x == y) then LTrue else LFalse)
     ,primRecord "pair?" 1 pairp
     ,primRecord "number?" 1 numberp
     ,primRecord "symbol?" 1 symbolp
