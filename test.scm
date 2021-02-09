@@ -47,18 +47,9 @@
                               ()))
                      1))))
 
-;; necessary to force eagerness in Haskell
-;; is the behavior seen with (loop) a bug?
-(define force
-  (vau (a) e
-       (with r (eval a e)
-             (if (size r) r 0))))
-
 (define vau-loop
   (vau-rec vau-loop () #f
            (eval (list vau-loop) ())))
-
-;; would like to put error here, but would require implementing error primitive
 
 (define lambda
   (vau (arglist body) env
@@ -68,15 +59,6 @@
                               (eval (cons list true-arg)
                                     true-env))
                         ())))))
-
-;; (define lambda-rec
-;;   (vau (name arglist body) env
-;;        (vau-rec true-rec true-arg true-env
-;;                 (eval (cons (eval (list vau arglist #f body)
-;;                                   (force (cons (cons name true-rec)
-;;                                                env)))
-;;                             (force (eval (cons list true-arg) true-env)))
-;;                       ()))))
 
 (define lambda-rec
   (vau (name arglist body) env
@@ -92,6 +74,8 @@
        (eval (list define name
                    (list lambda-rec name arglist body))
              env)))
+(defun error (x)
+  (effect (list 'error x)))
 
 (defun combine (f arg env)
   (eval (cons f arg) env))
@@ -118,8 +102,6 @@
 (define bool->string
   (lambda (x)
     (if x "#t" "#f")))
-
-;; (define list (lambda x x))
 
 (define leak-env
   (define 5 5))
@@ -192,14 +174,22 @@
 (defun fail ()
   (effect 'fail))
 
+(define capture
+  (vau (eff-arg cont-arg eff-body body) env
+       (with result (eval-capture body env)
+             (if (= (car result) 'value)
+                 (cdr result)
+                 (eval eff-body
+                       (cons (cons eff-arg (car (cdr result)))
+                             (cons (cons cont-arg (cdr (cdr result)))
+                                   env)))))))
+
 (define nd-run-all-rec
   (vau-rec nd-run-all-rec (exp) env
            (capture eff cont
                     (if (if (pair? eff)
                             (= (car eff) 'choose)
                             #f)
-                        ;; (apply append
-                        ;;        (map cont (cdr eff)))
                         (apply append
                                (map (lambda (c)
                                       (nd-run-all-rec (cont c)))
@@ -218,7 +208,6 @@
 (define powerset
   (lambda (l)
     (nd-run-all (filter choose-bool l))))
-;; (nd-run-all (with r (cons (choose-bool) (choose-bool)) (if (car r) (fail) (if (cdr r) r (fail)))))
 
 (defun gentag ()
   (effect 'gentag))
@@ -236,4 +225,3 @@
 (define with-tags
   (vau (exp) env
        (with-tags-from 0 (eval exp env))))
-;; (with-tags (repl (current-env)))

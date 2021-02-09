@@ -233,7 +233,6 @@ primCombRecordProc name nArgs f argl env =
     Nothing -> error ("Primitive " ++ name
                       ++ " did not get a proper argument list: " ++ show argl ++ "\n")
 
-primCombRecord :: String -> Int -> ([LData] -> LData -> LRet) -> (String,LData -> LData -> LRet)
 primCombRecord name nArgs f =
   (name, primCombRecordProc name nArgs f)
 
@@ -266,7 +265,7 @@ initEnv =
      (\[name,argPat,envArg,body] env -> LRRet (LVau name argPat envArg body env))
     ,primCombRecord "if" 3 (\[c,t,e] env -> evalIf c t e env)
     ,primArgsRecord "effect" 1 (\[eff] -> LREff eff LRRet)
-    ,primCombRecord "capture" 4 withCapture
+    ,primRecord "eval-capture" 2 (\[exp,env] -> capture (eval exp env))
     ,primRecord "pair?" 1 pairp
     ,primRecord "number?" 1 numberp
     ,primRecord "symbol?" 1 symbolp
@@ -280,6 +279,9 @@ initEnv =
     ,primRecord "%" 2 (\[LInt x,LInt y] -> LInt (rem x y))
     ,primRecord "*" 2 (\[LInt x,LInt y] -> LInt (x*y))
     ]
+
+capture (LRRet r) = LCons (LSym "value") r
+capture (LREff eff cont) = LCons (LSym "effect") (LCons eff (LCont cont))
 
 pairp [LCons _ _] = LTrue
 pairp _ = LFalse
@@ -295,12 +297,6 @@ stringp _ = LFalse
 
 nullp [LNil] = LTrue
 nullp _ = LFalse
-
-withCapture [var,cVar,cap,body] env =
-  case eval body env of
-    LRRet r -> LRRet r
-    LREff eff cont ->
-      eval cap (acons var eff (acons cVar (LCont cont) env))
 
 evalTop :: [LData] -> LData -> LRet
 evalTop (a:b) env = (continue (eval a env) (\x -> evalTop b x))
@@ -320,8 +316,7 @@ mainHandle (LREff (LCons (LSym "write") (LCons x LNil)) cont) = do {
 mainArgs :: [String] -> LData -> IO ()
 mainArgs [] env = return ()
 mainArgs ("-e":expString:rest) env = do {
-    result <- mainHandle (evalTop (readForest expString) env);
-    print result;
+    mainHandle (evalTop (readForest expString) env) >>= print;
     mainArgs rest env
   }
 mainArgs ("-f":fileName:rest) env = do {
