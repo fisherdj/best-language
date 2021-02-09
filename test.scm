@@ -74,7 +74,6 @@
        (eval (list define name
                    (list lambda-rec name arglist body))
              env)))
-
 (defun error (x)
   (effect (list 'error x)))
 
