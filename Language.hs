@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances #-}
 import Data.Char
 import System.Environment
 
@@ -73,7 +74,7 @@ instance Show LData where
 data LRet = LRRet LData | LREff LData (LData -> LRet)
 
 instance Show LRet where
-  show (LRRet d) = "RETURN " ++ show d
+  show (LRRet x) = "RETURN " ++ show x
   show (LREff eff cont) = "EFFECT " ++ show eff
 
 showcdr (LNil) = ")"
@@ -158,10 +159,6 @@ readString (x:rest) =
 ---- ************************ ----
 ---- *EVALUATION STARTS HERE* ----
 ---- ************************ ----
-isTrue :: LData -> Bool
-isTrue LFalse = False
-isTrue _ = True
-
 acons :: LData -> LData -> LData -> LData
 acons k v e = LCons (LCons k v) e
 
@@ -211,92 +208,84 @@ eval (LSym s) env =
     Just x -> LRRet x
 eval x _ = LRRet x
 
-evalIf c t e env =
-  continue (eval c env) (\x -> if isTrue x then (eval t env) else (eval e env))
-asList :: LData -> Maybe [LData]
-asList (LNil) = Just []
-asList (LCons a b) =
-  case asList b of
-    Nothing -> Nothing
-    Just t -> Just (a:t)
-asList x = Nothing
+class PrimOp a where
+  getPrim :: String -> a -> LData -> LData -> LRet
 
-primCombRecordProc :: String -> Int -> ([LData] -> LData -> LRet) -> LData -> LData -> LRet
-primCombRecordProc name nArgs f argl env =
-  case asList argl of
-    Just l ->
-      if length l == nArgs
-      then f l env
-      else error ("Primitive " ++ name
-                  ++ " expected " ++ show nArgs
-                  ++ " arguments but got " ++ show (length l))
-    Nothing -> error ("Primitive " ++ name
-                      ++ " did not get a proper argument list: " ++ show argl ++ "\n")
+instance PrimOp LRet where
+  getPrim _ x LNil _ = x
+  getPrim name _ y _ =
+    error ("Primitive " ++ name ++ " got extra arguments: " ++ show y)
 
-primCombRecord name nArgs f =
-  (name, primCombRecordProc name nArgs f)
+instance PrimOp LData where
+  getPrim name x = getPrim name (LRRet x)
 
-callArgs :: ([LData] -> LRet) -> [LData] -> LData -> LRet
-callArgs f (a:b) env =
-  continue (eval a env) (\x -> callArgs (\xs -> f (x:xs)) b env)
-callArgs f [] _ = f []
+instance PrimOp Integer where
+  getPrim name n = getPrim name (LInt n)
 
-primArgsRecord :: String -> Int -> ([LData] -> LRet) -> (String,LData -> LData -> LRet)
-primArgsRecord name nArgs f =
-  primCombRecord name nArgs (callArgs f)
+instance PrimOp Bool where
+  getPrim name True = getPrim name LTrue
+  getPrim name False = getPrim name LFalse
 
-primRecord :: String -> Int -> ([LData] -> LData) -> (String,LData -> LData -> LRet)
-primRecord name nArgs f =
-  primArgsRecord name nArgs (\l -> LRRet (f l))
+instance PrimOp a => PrimOp (LData -> a) where
+  getPrim name f (LCons x xs) env =
+    continue (eval x env) (\x -> getPrim name (f x) xs env)
+  getPrim name f LNil _ =
+    error ("Primitive " ++ name  ++ " got too few arguments")
+
+instance PrimOp a => PrimOp (Integer -> a) where
+  getPrim name f =
+    getPrim name (\x ->
+                    case x of
+                      LInt n -> f n
+                      _ -> error ("Primitive " ++ name
+                                  ++ " got non-numeric argument " ++ show x))
+
+primCombRecord name f =
+  (name, getPrim name f)
+
+primRecord name f = (name,getPrim name f)
 
 makePrimEnv :: [(String,LData -> LData -> LRet)] -> LData
 makePrimEnv ((name,fun):xs) = acons (LSym name) (LPrim fun) (makePrimEnv xs)
 makePrimEnv [] = LNil
 
+primIf (LCons c (LCons t (LCons e LNil))) env =
+  continue (eval c env) (\x -> case x of {LFalse -> eval e env;_ -> eval t env})
+primIf x _ =
+  error ("Primitive if got invalid argument list: " ++ show x)
+
+primVauRec (LCons name (LCons argPat (LCons envArg (LCons body LNil)))) env =
+  LRRet (LVau name argPat envArg body env)
+primVauRec x _ =
+  error ("Primitive primVauRec got invalid argument list: " ++ show x)
+
 initEnv :: LData
 initEnv =
   makePrimEnv
-    [primRecord "cons" 2 (\[x,y] -> LCons x y)
-    ,primRecord "=" 2 (\[x,y] -> if (x == y) then LTrue else LFalse)
-    ,primArgsRecord "eval" 2 (\[exp,env] -> eval exp env)
-    ,primCombRecord "vau" 3
-     (\[argPat,envArg,body] env -> LRRet (LVau LFalse argPat envArg body env))
-    ,primCombRecord "vau-rec" 4
-     (\[name,argPat,envArg,body] env -> LRRet (LVau name argPat envArg body env))
-    ,primCombRecord "if" 3 (\[c,t,e] env -> evalIf c t e env)
-    ,primArgsRecord "effect" 1 (\[eff] -> LREff eff LRRet)
-    ,primRecord "eval-capture" 2 (\[exp,env] -> capture (eval exp env))
-    ,primRecord "pair?" 1 pairp
-    ,primRecord "number?" 1 numberp
-    ,primRecord "symbol?" 1 symbolp
-    ,primRecord "string?" 1 stringp
-    ,primRecord "null?" 1 nullp
-    ,primRecord "car" 1 (\[LCons a b] -> a)
-    ,primRecord "cdr" 1 (\[LCons a b] -> b)
-    ,primRecord "+" 2 (\[LInt x,LInt y] -> LInt (x+y))
-    ,primRecord "-" 2 (\[LInt x,LInt y] -> LInt (x - y))
-    ,primRecord "/" 2 (\[LInt x,LInt y] -> LInt (div x y))
-    ,primRecord "%" 2 (\[LInt x,LInt y] -> LInt (rem x y))
-    ,primRecord "*" 2 (\[LInt x,LInt y] -> LInt (x*y))
+    [primRecord "cons" LCons
+    ,primRecord "=" ((==) :: LData -> LData -> Bool)
+    ,primRecord "eval" eval
+    ,("vau",primVauRec . LCons LFalse)
+    ,("vau-rec",primVauRec)
+    ,("if",primIf)
+    ,primRecord "effect" (\x -> LREff x LRRet)
+    ,primRecord "eval-capture" (\exp env -> capture (eval exp env))
+    ,primRecord "pair?" (\x -> case x of {LCons _ _ -> True;_ -> False})
+    ,primRecord "number?" (\x -> case x of {LInt _ -> True;_ -> False})
+    ,primRecord "symbol?" (\x -> case x of {LSym _ -> True;_ -> False})
+    ,primRecord "string?" (\x -> case x of {LStr _ -> True;_ -> False})
+    ,primRecord "null?" (\x -> case x of {LNil -> True;_ -> False})
+    ,primRecord "car" (\(LCons a _) -> a)
+    ,primRecord "cdr" (\(LCons _ b) -> b)
+    ,primRecord "+" ((+) :: Integer -> Integer -> Integer)
+    ,primRecord "-" ((-) :: Integer -> Integer -> Integer)
+    ,primRecord "/" (div :: Integer -> Integer -> Integer)
+    ,primRecord "%" (mod :: Integer -> Integer -> Integer)
+    ,primRecord "*" ((*) :: Integer -> Integer -> Integer)
     ]
 
 capture (LRRet r) = LCons (LSym "value") r
 capture (LREff eff cont) = LCons (LSym "effect") (LCons eff (LCont cont))
-
-pairp [LCons _ _] = LTrue
-pairp _ = LFalse
-
-numberp [LInt _] = LTrue
-numberp _ = LFalse
-
-symbolp [LSym _] = LTrue
-symbolp _ = LFalse
-
-stringp [LStr _] = LTrue
-stringp _ = LFalse
-
-nullp [LNil] = LTrue
-nullp _ = LFalse
 
 evalTop :: [LData] -> LData -> LRet
 evalTop (a:b) env = (continue (eval a env) (\x -> evalTop b x))
