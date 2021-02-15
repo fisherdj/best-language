@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 import Data.Char
 import System.Environment
+import Control.Monad
 
 digitInt :: Char -> Maybe Integer
 digitInt '0' = Just 0
@@ -44,8 +45,8 @@ data LData =
   | LInt Integer
   | LCons LData LData
   | LVau LData LData LData LData LData
-  | LPrim (LData -> LData -> LRet)
-  | LCont (LData -> LRet)
+  | LPrim (LData -> LData -> LRet LData)
+  | LCont (LData -> LRet LData)
 
 instance Eq LData where
   LNil == LNil = True
@@ -71,9 +72,21 @@ instance Show LData where
   show (LPrim _) = "<primitive>"
   show (LCont _) = "<continuation>"
 
-data LRet = LRRet LData | LREff LData (LData -> LRet)
+data LRet a = LRRet a | LREff LData (LData -> LRet a)
 
-instance Show LRet where
+instance Functor LRet where
+  fmap = liftM
+
+instance Applicative LRet where
+  pure = LRRet
+  (<*>) = ap
+
+instance Monad LRet where
+  return = pure
+  LRRet x >>= f = f x
+  LREff e c >>= f = LREff e (\x -> c x >>= f)
+
+instance Show a => Show (LRet a) where
   show (LRRet x) = "RETURN " ++ show x
   show (LREff eff cont) = "EFFECT " ++ show eff
 
@@ -178,18 +191,13 @@ patMatch (LCons pa pb) (LCons aa ab) env =
 patMatch x y env =
   if x == y then Just env else Nothing
 
-continue :: LRet -> (LData -> LRet) -> LRet
-continue (LREff eff bCont) cont =
-  LREff eff (\x -> continue (bCont x) cont)
-continue (LRRet d) cont = cont d
-
-combine :: LData -> LData -> LData -> LRet
+combine :: LData -> LData -> LData -> LRet LData
 combine comb argl env =
   case comb of
     LPrim f -> f argl env
     LCont f ->
       case argl of
-        LCons arg LNil -> continue (eval arg env) f
+        LCons arg LNil -> eval arg env >>= f
         _ -> error ("Invalid argument list to continuation: " ++ show argl)
     LVau rarg argpat earg body venv ->
       case patMatch argpat argl (acons earg env (acons rarg comb venv)) of
@@ -199,9 +207,9 @@ combine comb argl env =
         Just e -> eval body e
     _ -> error ("Invalid combiner " ++ show comb)
 
-eval :: LData -> LData -> LRet
+eval :: LData -> LData -> LRet LData
 eval (LCons funExp args) env =
-  continue (eval funExp env) (\f -> combine f args env)
+  eval funExp env >>= (\f -> combine f args env)
 eval (LSym s) env =
   case aref (LSym s) env of
     Nothing -> error ("eval Unbound variable " ++ s ++ " in " ++ show env)
@@ -209,9 +217,9 @@ eval (LSym s) env =
 eval x _ = LRRet x
 
 class PrimOp a where
-  getPrim :: String -> a -> LData -> LData -> LRet
+  getPrim :: String -> a -> LData -> LData -> LRet LData
 
-instance PrimOp LRet where
+instance PrimOp (LRet LData) where
   getPrim _ x LNil _ = x
   getPrim name _ y _ =
     error ("Primitive " ++ name ++ " got extra arguments: " ++ show y)
@@ -228,7 +236,7 @@ instance PrimOp Bool where
 
 instance PrimOp a => PrimOp (LData -> a) where
   getPrim name f (LCons x xs) env =
-    continue (eval x env) (\x -> getPrim name (f x) xs env)
+    eval x env >>= \x -> getPrim name (f x) xs env
   getPrim name f LNil _ =
     error ("Primitive " ++ name  ++ " got too few arguments")
 
@@ -242,12 +250,16 @@ instance PrimOp a => PrimOp (Integer -> a) where
 
 primRecord name f = (name,getPrim name f)
 
-makePrimEnv :: [(String,LData -> LData -> LRet)] -> LData
+makePrimEnv :: [(String,LData -> LData -> LRet LData)] -> LData
 makePrimEnv ((name,fun):xs) = acons (LSym name) (LPrim fun) (makePrimEnv xs)
 makePrimEnv [] = LNil
 
-primIf (LCons c (LCons t (LCons e LNil))) env =
-  continue (eval c env) (\x -> case x of {LFalse -> eval e env;_ -> eval t env})
+primIf (LCons c (LCons t (LCons e LNil))) env = do
+  x <- eval c env;
+  case x of
+    LFalse -> eval e env
+    LTrue -> eval t env
+
 primIf x _ =
   error ("Primitive if got invalid argument list: " ++ show x)
 
@@ -284,35 +296,27 @@ initEnv =
 capture (LRRet r) = LCons (LSym "value") r
 capture (LREff eff cont) = LCons (LSym "effect") (LCons eff (LCont cont))
 
-evalTop :: [LData] -> LData -> LRet
-evalTop (a:b) env = (continue (eval a env) (\x -> evalTop b x))
-evalTop [] env = LRRet env
+evalTop :: LData -> [LData] -> LRet LData
+evalTop = foldM eval
 
-mainHandle :: LRet -> IO LData
+mainHandle :: LRet LData -> IO LData
 mainHandle (LRRet r) = return r
-mainHandle (LREff (LSym "read") cont) = do {
-    ln <- getLine;
-    mainHandle (cont (fst (readExpr ln)))
-  }
-mainHandle (LREff (LCons (LSym "write") (LCons x LNil)) cont) = do {
-    print x;
-    mainHandle (cont LNil)
-  }
+mainHandle (LREff (LSym "read") cont) =
+    getLine >>= mainHandle . cont . fst . readExpr
+mainHandle (LREff (LCons (LSym "write") (LCons x LNil)) cont) =
+    print x >> mainHandle (cont LNil)
 
-mainArgs :: [String] -> LData -> IO ()
-mainArgs [] env = return ()
-mainArgs ("-e":expString:rest) env = do {
-    mainHandle (evalTop (readForest expString) env) >>= print;
-    mainArgs rest env
+mainArgs :: LData -> [String] -> IO ()
+mainArgs env [] = return ()
+mainArgs env ("-e":expString:rest) = do {
+    mainHandle (evalTop env (readForest expString)) >>= print;
+    mainArgs env rest
   }
-mainArgs ("-f":fileName:rest) env = do {
+mainArgs env ("-f":fileName:rest) = do {
     file <- readFile fileName;
-    result <- mainHandle (evalTop (readForest file) env);
-    mainArgs rest result
+    result <- mainHandle (evalTop env (readForest file));
+    mainArgs result rest
   }
 
 main :: IO ()
-main = do {
-    args <- getArgs;
-    mainArgs args initEnv
-  }
+main = getArgs >>= mainArgs initEnv
