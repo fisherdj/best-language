@@ -240,9 +240,6 @@ instance PrimOp a => PrimOp (Integer -> a) where
                       _ -> error ("Primitive " ++ name
                                   ++ " got non-numeric argument " ++ show x))
 
-primCombRecord name f =
-  (name, getPrim name f)
-
 primRecord name f = (name,getPrim name f)
 
 makePrimEnv :: [(String,LData -> LData -> LRet)] -> LData
